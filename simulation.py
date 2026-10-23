@@ -47,7 +47,7 @@ class GameSimulation:
         for q in self.particles:
             q.life -= dt
             q.x += q.vx * dt
-            q.y += q.vy * dt
+            q.y += q.vx * dt
             q.z += q.vz * dt
             q.vz -= q.grav * dt
             q.ang += q.spin * dt
@@ -55,12 +55,10 @@ class GameSimulation:
                 if q.shape != "dot" and q.vz < -90:      # car parts bounce
                     q.z, q.vz = 0, -q.vz * 0.4
                     q.vx *= 0.6
-                    q.vy *= 0.6
                     q.spin *= 0.6
                 else:
                     q.z, q.vz = 0, 0
                     q.vx *= 0.5
-                    q.vy *= 0.5
                     q.spin *= 0.5
         self.particles = [q for q in self.particles if q.life > 0]
         self.active_surface_shake_strength = max(0.0, self.active_surface_shake_strength - 45 * dt)
