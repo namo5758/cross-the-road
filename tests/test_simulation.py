@@ -3,7 +3,15 @@
 Run with: python -m unittest discover -s tests -v
 """
 
+import sys
 import unittest
+from unittest.mock import MagicMock
+
+# Simulation imports Pygame through geometry, but these tests exercise no drawing.
+try:
+    import pygame  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["pygame"] = MagicMock()
 
 from entities import Particle, Person
 from simulation import GameSimulation
