@@ -47,7 +47,7 @@ class GameSimulation:
         for q in self.particles:
             q.life -= dt
             q.x += q.vx * dt
-            q.y += q.vx * dt
+            q.y += q.lateral_speed * dt
             q.z += q.vz * dt
             q.vz -= q.grav * dt
             q.ang += q.spin * dt
@@ -376,7 +376,6 @@ class GameSimulation:
 
     def save(self, p):
         p.saved = True
-        p.go = False
         p.go = False
         p.panic = False
         slot = sum(1 for q in self.people if q.saved)
