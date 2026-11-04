@@ -10,549 +10,768 @@ import random
 import pygame
 
 from entities import Car, Drone, Fire, Particle, Puddle
-from game_config import (ACCENT, BAD, BLOOD, BLOOD_HI, CW_X0, CW_X1, GOAL_Y,
-                         GOOD, ICECREAM_GOO, LANES, ROAD_BOT, ROAD_TOP,
-                         VEHICLES, W, WORLD_BOT)
-from geometry import clamp, in_band, in_road, lane_center, local, mix, proj, shade
+from game_config import (
+    ACCENT_COLOR,
+    BAD_COLOR,
+    BLOOD,
+    BLOOD_HIGHLIGHT,
+    CROSSING_START_X,
+    CROSSING_END_X,
+    GOAL_Y,
+    GOOD_COLOR,
+    ICECREAM_GOO,
+    LANES,
+    ROAD_BOTTOM,
+    ROAD_TOP,
+    SCREEN_WIDTH,
+    VEHICLES,
+    WORLD_BOTTOM,
+)
+from geometry import clamp, in_band, in_road, lane_center, local, project, shade
 
 
 class GameSimulation:
-    def update(self, dt):
+    # One simulation frame: update traffic and animation, then active gameplay, then temporary effects.
+    # delta_time is elapsed seconds; speed * delta_time gives movement for this frame.
+    # ระยะที่เคลื่อนในเฟรมนี้ = ความเร็ว × เวลาที่ผ่านไป เช่น 60 หน่วย/วินาที × 1/60 วินาที = 1 หน่วย
+    def update(self, delta_time):
         if self.state == "title" or self.paused:
             return
         if self.state == "play":
-            self.elapsed_time += dt
-        self.update_traffic(dt)
-        for p in self.people:
-            self.animate_person(p, dt)
+            self.elapsed_time += delta_time
+        self.update_traffic(delta_time)
+        for person in self.people:
+            self.animate_person(person, delta_time)
         if self.state == "play":
-            for p in self.people:
-                self.update_person(p, dt)
+            for person in self.people:
+                self.update_person(person, delta_time)
             self.check_hits()
             self.check_end()
         else:
-            self.end_screen_timer += dt
-        for pd in self.blood_puddles:
-            pd.life -= dt
-        self.blood_puddles = [pd for pd in self.blood_puddles if pd.life > 0]
-        for f in self.fires:
-            f.life -= dt
+            self.end_screen_timer += delta_time
+
+        for puddle in self.blood_puddles:
+            puddle.life -= delta_time
+        self.blood_puddles = [puddle for puddle in self.blood_puddles if puddle.life > 0]
+
+        for fire in self.fires:
+            fire.life -= delta_time
             if random.random() < 0.6:
-                a, r = random.uniform(0, math.tau), random.uniform(0, f.r * 0.8)
-                self.particles.append(Particle(f.x + math.cos(a) * r, f.y + math.sin(a) * r * 0.6, 4,
-                                               0, 0, random.uniform(40, 90),
-                                               random.choice([(255, 150, 40), (255, 90, 30), (255, 210, 80)]),
-                                               random.uniform(2, 4), 0.6, grav=-20))
-        self.fires = [f for f in self.fires if f.life > 0]
-        for q in self.particles:
-            q.life -= dt
-            q.x += q.vx * dt
-            q.y += q.vx * dt
-            q.z += q.vz * dt
-            q.vz -= q.grav * dt
-            q.ang += q.spin * dt
-            if q.z < 0:
-                if q.shape != "dot" and q.vz < -90:      # car parts bounce
-                    q.z, q.vz = 0, -q.vz * 0.4
-                    q.vx *= 0.6
-                    q.spin *= 0.6
+                angle = random.uniform(0, math.tau)
+                radius = random.uniform(0, fire.radius * 0.8)
+                self.particles.append(Particle(
+                    fire.x + math.cos(angle) * radius,
+                    fire.y + math.sin(angle) * radius * 0.6,
+                    4,
+                    0,
+                    0,
+                    random.uniform(40, 90),
+                    random.choice([(255, 150, 40), (255, 90, 30), (255, 210, 80)]),
+                    random.uniform(2, 4),
+                    0.6,
+                    gravity=-20
+                ))
+        self.fires = [fire for fire in self.fires if fire.life > 0]
+
+        for particle in self.particles:
+            particle.life -= delta_time
+            # Euler integration: position += velocity * time, then vertical velocity -= gravity * time.
+            # อัปเดตตำแหน่งจากความเร็วก่อน แล้วปรับความเร็วแนวดิ่งด้วยแรงโน้มถ่วง
+            particle.x += particle.velocity_x * delta_time
+            particle.y += particle.velocity_y * delta_time
+            particle.z += particle.velocity_z * delta_time
+            particle.velocity_z -= particle.gravity * delta_time
+            particle.angle += particle.spin * delta_time
+            if particle.z < 0:
+                if particle.shape != "dot" and particle.velocity_z < -90:      # car parts bounce
+                    # Reverse the downward velocity and keep 40% for a smaller bounce; reduce horizontal motion too.
+                    particle.z, particle.velocity_z = 0, -particle.velocity_z * 0.4
+                    particle.velocity_x *= 0.6
+                    particle.velocity_y *= 0.6
+                    particle.spin *= 0.6
                 else:
-                    q.z, q.vz = 0, 0
-                    q.vx *= 0.5
-                    q.spin *= 0.5
-        self.particles = [q for q in self.particles if q.life > 0]
-        self.active_surface_shake_strength = max(0.0, self.active_surface_shake_strength - 45 * dt)
-        self.flash_intensity = max(0.0, self.flash_intensity - 3 * dt)
-        for im in self.impact_messages:
-            im[3] -= dt
-        self.impact_messages = [im for im in self.impact_messages if im[3] > 0]
-        self.skid_mark_fade_timer += dt
+                    particle.z, particle.velocity_z = 0, 0
+                    particle.velocity_x *= 0.5
+                    particle.velocity_y *= 0.5
+                    particle.spin *= 0.5
+        self.particles = [particle for particle in self.particles if particle.life > 0]
+
+        self.active_surface_shake_strength = max(0.0, self.active_surface_shake_strength - 45 * delta_time)
+        self.flash_intensity = max(0.0, self.flash_intensity - 3 * delta_time)
+
+        for impact_message in self.impact_messages:
+            impact_message[3] -= delta_time
+        self.impact_messages = [impact_message for impact_message in self.impact_messages if impact_message[3] > 0]
+
+        self.skid_mark_fade_timer += delta_time
         if self.skid_mark_fade_timer > 0.5:                      # skid marks slowly fade away
             self.skid_mark_fade_timer = 0
+            # Multiplicative fading scales alpha by 246/255 every half-second while keeping the color channels unchanged.
             self.skid_mark_surface.fill((255, 255, 255, 246), special_flags=pygame.BLEND_RGBA_MULT)
-        for fl in self.floating_messages:
-            fl[4] -= dt
-            if fl[3]:
-                fl[2] += 30 * dt
-        self.floating_messages = [fl for fl in self.floating_messages if fl[4] > 0]
-        for t in self.toast_messages:
-            t[1] -= dt
-        self.toast_messages = [t for t in self.toast_messages if t[1] > 0]
 
-    def update_traffic(self, dt, prewarm=False):
+        for floater in self.floating_messages:
+            floater[4] -= delta_time
+            if floater[3]:
+                floater[2] += 30 * delta_time
+        self.floating_messages = [floater for floater in self.floating_messages if floater[4] > 0]
+
+        for toast_entry in self.toast_messages:
+            toast_entry[1] -= delta_time
+        self.toast_messages = [toast_entry for toast_entry in self.toast_messages if toast_entry[1] > 0]
+
+    def update_traffic(self, delta_time, pre_warm=False):
         level_settings = self.current_level
-        for i in range(LANES):
-            self.lane_freeze_timers[i] = max(0.0, self.lane_freeze_timers[i] - dt)
-            self.spawn_timers[i] -= dt
-            if self.spawn_timers[i] <= 0:
-                kind = random.choices(list(level_settings["mix"]), weights=list(level_settings["mix"].values()))[0]
-                c = Car(i, kind, level_settings)
-                edge_clear = all(not (o.blocks(i) and abs(o.x - c.x) < (o.length + c.length) / 2 + 40)
-                                 for o in self.cars if not o.towed)
+        for lane_index in range(LANES):
+            self.lane_freeze_timers[lane_index] = max(0.0, self.lane_freeze_timers[lane_index] - delta_time)
+            self.spawn_timers[lane_index] -= delta_time
+            if self.spawn_timers[lane_index] <= 0:
+                # Weighted selection: chance of a kind = its mix weight / sum of all mix weights.
+                # โอกาสสุ่มรถแต่ละชนิด = น้ำหนักของชนิดนั้น / ผลรวมน้ำหนักรถทั้งหมด
+                vehicle_kind = random.choices(list(level_settings["mix"]), weights=list(level_settings["mix"].values()))[0]
+                new_car = Car(lane_index, vehicle_kind, level_settings)
+                # A new vehicle needs center separation >= half both lengths + 40 units of entry clearance.
+                edge_clear = all(
+                    not (other_car.blocks(lane_index) and abs(other_car.x - new_car.x) < (other_car.length + new_car.length) / 2 + 40)
+                    for other_car in self.cars if not other_car.towed
+                )
                 if edge_clear:
-                    self.cars.append(c)
-                    self.spawn_timers[i] = random.uniform(*level_settings["gap"])
+                    self.cars.append(new_car)
+                    self.spawn_timers[lane_index] = random.uniform(*level_settings["gap"])
                 else:
-                    self.spawn_timers[i] = 0.3
-        grandmas = [p for p in self.people if p.alive and not p.saved and p.kind == "grandma"
-                    and ROAD_TOP - 20 < p.y < ROAD_BOT + 20] if not prewarm else []
-        road = [o for o in self.cars if not o.towed]
-        for c in self.cars:
-            if c.towed:
+                    self.spawn_timers[lane_index] = 0.3
+
+        grandmothers = [
+            person for person in self.people
+            if person.alive and not person.saved and person.kind == "grandma"
+            and ROAD_TOP - 20 < person.y < ROAD_BOTTOM + 20
+        ] if not pre_warm else []
+
+        active_road_cars = [car for car in self.cars if not car.towed]
+        for car in self.cars:
+            if car.towed:
                 continue                                  # the drone moves it
-            if c.wreck:
-                c.wreck_t += dt
-                if c.fuse > 0:
-                    c.fuse -= dt
+            if car.wreck:
+                car.wreck_time += delta_time
+                if car.fuse > 0:
+                    car.fuse -= delta_time
                     if random.random() < 0.6:            # leaking fuel sparks
-                        self.particles.append(Particle(c.x + random.uniform(-c.length / 3, c.length / 3), c.y, 8,
-                                                       random.uniform(-40, 40), random.uniform(-20, 20),
-                                                       random.uniform(60, 140), random.choice([(255, 200, 60), (255, 120, 30)]),
-                                                       2, 0.4))
-                    if c.fuse <= 0:
-                        c.burnt = True
-                        c.col = (52, 48, 46)
-                        self.explode(c.x, c.y, power=1.8)
+                        self.particles.append(Particle(
+                            car.x + random.uniform(-car.length / 3, car.length / 3),
+                            car.y,
+                            8,
+                            random.uniform(-40, 40),
+                            random.uniform(-20, 20),
+                            random.uniform(60, 140),
+                            random.choice([(255, 200, 60), (255, 120, 30)]),
+                            2,
+                            0.4
+                        ))
+                    if car.fuse <= 0:
+                        car.burnt = True
+                        car.color = (52, 48, 46)
+                        self.explode(car.x, car.y, power=1.8)
                 if random.random() < 0.25:
-                    self.particles.append(Particle(c.x + random.uniform(-c.length / 4, c.length / 4), c.y, c.height,
-                                                   random.uniform(-6, 6), 0, random.uniform(25, 45),
-                                                   random.choice([(80, 80, 84), (110, 110, 114)]),
-                                                   random.uniform(3, 6), 1.6, grav=-8))
+                    self.particles.append(Particle(
+                        car.x + random.uniform(-car.length / 4, car.length / 4),
+                        car.y,
+                        car.height,
+                        random.uniform(-6, 6),
+                        0,
+                        random.uniform(25, 45),
+                        random.choice([(80, 80, 84), (110, 110, 114)]),
+                        random.uniform(3, 6),
+                        1.6,
+                        gravity=-8
+                    ))
                 continue
-            if c.skid > 0:
+
+            if car.skid > 0:
                 # sliding sideways on blood: keeps going forward, drifts into the next lane
-                c.skid -= dt
-                c.speed *= (1 - 0.5 * dt)
-                c.y = clamp(c.y + c.lateral_speed * dt, ROAD_TOP + c.width / 2 + 2, ROAD_BOT - c.width / 2 - 2)
-                wobble = math.sin(c.skid * 18) * 0.08
-                c.heading = math.atan2(c.lateral_speed * 0.6, c.dir * max(c.speed, 1)) + wobble
-                if c.skid <= 0:
-                    c.lateral_speed = 0
-                    c.lane = min((c.lane, c.lane ^ 1), key=lambda L: abs(lane_center(L) - c.y))
+                car.skid -= delta_time
+                car.speed *= (1 - 0.5 * delta_time)
+                car.y = clamp(car.y + car.lateral_speed * delta_time, ROAD_TOP + car.width / 2 + 2, ROAD_BOTTOM - car.width / 2 - 2)
+                wobble = math.sin(car.skid * 18) * 0.08
+                # atan2(sideways_speed, forward_speed) turns the car toward its movement; sine adds skid wobble.
+                car.heading = math.atan2(car.lateral_speed * 0.6, car.direction * max(car.speed, 1)) + wobble
+                if car.skid <= 0:
+                    car.lateral_speed = 0
+                    # Bitwise XOR with 1 swaps paired lanes: 0 <-> 1 and 2 <-> 3. Choose the closer lane center.
+                    # XOR ด้วย 1 ใช้สลับเลนคู่กัน เช่น 0 กับ 1 และ 2 กับ 3 แล้วเลือกเลนที่อยู่ใกล้กว่า
+                    car.lane = min((car.lane, car.lane ^ 1), key=lambda lane_index: abs(lane_center(lane_index) - car.y))
             else:
-                if c.stall > 0:
-                    c.stall -= dt
-                    target = 0
+                if car.stall > 0:
+                    car.stall -= delta_time
+                    target_speed = 0
                 else:
-                    target = c.base_speed
-                    if self.lane_freeze_timers[c.lane] > 0:
-                        target = 0
-                    for g in grandmas:
-                        if abs(c.x - g.x) < 170 and abs(c.y - g.y) < 75:
-                            target *= 0.35
+                    target_speed = car.base_speed
+                    if self.lane_freeze_timers[car.lane] > 0:
+                        target_speed = 0
+                    for grandmother in grandmothers:
+                        if abs(car.x - grandmother.x) < 170 and abs(car.y - grandmother.y) < 75:
+                            target_speed *= 0.35
                     gap = 1e9
-                    ahead = None
-                    for o in road:
-                        if o is c or not o.blocks(c.lane):
+                    ahead_car = None
+                    for other_car in active_road_cars:
+                        if other_car is car or not other_car.blocks(car.lane):
                             continue
-                        d = (o.x - c.x) * c.dir
-                        if d > 0:
-                            g_ = d - (o.length + c.length) / 2
-                            if g_ < gap:
-                                ahead, gap = o, g_
-                    if ahead:
-                        stop_dist = c.speed * c.speed / (2 * 480) + 16      # distance needed to stop
-                        if gap < stop_dist + 30:
-                            target = min(target, 0 if (gap < stop_dist or ahead.wreck) else ahead.speed * 0.9)
-                dv = target - c.speed
-                rate = 520 if dv < 0 else 200
-                c.speed += clamp(dv, -rate * dt, rate * dt)
+                        # Multiply by direction so a positive distance always means ahead, even for left-moving cars.
+                        distance_ahead = (other_car.x - car.x) * car.direction
+                        if distance_ahead > 0:
+                            # Front-to-back clearance = center distance - half the combined vehicle lengths.
+                            gap_distance = distance_ahead - (other_car.length + car.length) / 2
+                            if gap_distance < gap:
+                                ahead_car, gap = other_car, gap_distance
+                    if ahead_car:
+                        # Braking formula d = v^2 / (2*a), using deceleration 480, plus a 16-unit safety margin.
+                        # ระยะเบรกใช้สูตร v² / (2a): รถเร็วขึ้นสองเท่าจะต้องใช้ระยะเบรกสี่เท่า เมื่อความหน่วงเท่าเดิม
+                        stop_distance = car.speed * car.speed / (2 * 480) + 16      # distance needed to stop
+                        if gap < stop_distance + 30:
+                            target_speed = min(target_speed, 0 if (gap < stop_distance or ahead_car.wreck) else ahead_car.speed * 0.9)
+                # Approach target speed with a per-frame acceleration limit; braking is stronger than acceleration.
+                speed_delta = target_speed - car.speed
+                rate = 520 if speed_delta < 0 else 200
+                car.speed += clamp(speed_delta, -rate * delta_time, rate * delta_time)
                 # ease back into the lane and point straight again
-                c.y += (lane_center(c.lane) - c.y) * min(1.0, 2.5 * dt)
-                c.heading += (c.base_ang - c.heading) * min(1.0, 4 * dt)
-            c.x += c.dir * c.speed * dt
-            if (c.skid > 0 or (c.stall > 0 and c.speed > 30)) and not prewarm:
-                self.skid_marks(c)
+                # Easing formula: current += (target - current) * fraction. Capping the fraction prevents overshoot.
+                # นำระยะที่ยังห่างจากเป้าหมายมาคูณสัดส่วน แล้วบวกกลับเข้าตำแหน่งปัจจุบัน
+                car.y += (lane_center(car.lane) - car.y) * min(1.0, 2.5 * delta_time)
+                car.heading += (car.base_angle - car.heading) * min(1.0, 4 * delta_time)
+            car.x += car.direction * car.speed * delta_time
+            if (car.skid > 0 or (car.stall > 0 and car.speed > 30)) and not pre_warm:
+                self.skid_marks(car)
             else:
-                c.skid_points = None
+                car.skid_points = None
+
             # slippery blood
-            if c.skid <= 0 and c.speed > 40:
-                for pd in self.blood_puddles:
-                    if id(c) in pd.hit:
+            if car.skid <= 0 and car.speed > 40:
+                for puddle in self.blood_puddles:
+                    if id(car) in puddle.hit_car_identifiers:
                         continue
-                    if math.hypot(c.x - pd.x, c.y - pd.y) < pd.r + c.width * 0.45:
-                        pd.hit.add(id(c))
-                        if pd.r < 20 and random.random() < 0.6:
+                    if math.hypot(car.x - puddle.x, car.y - puddle.y) < puddle.radius + car.width * 0.45:
+                        puddle.hit_car_identifiers.add(id(car))
+                        if puddle.radius < 20 and random.random() < 0.6:
                             continue              # small puddles only sometimes make a car slide
-                        c.skid = 0.9
-                        other = c.lane ^ 1
-                        c.lateral_speed = (lane_center(other) - c.y) / 0.9 * random.uniform(0.8, 1.15)
-                        self.float_text(c.x, c.y, "ลื่น!", ACCENT)
-                        if not prewarm:
-                            self.toast("รถลื่นคราบเลือด!", ACCENT)
+                        car.skid = 0.9
+                        other_lane = car.lane ^ 1
+                        # Sideways speed = distance to the paired lane / skid duration, with a small random multiplier.
+                        car.lateral_speed = (lane_center(other_lane) - car.y) / 0.9 * random.uniform(0.8, 1.15)
+                        self.float_text(car.x, car.y, "ลื่น!", ACCENT_COLOR)
+                        if not pre_warm:
+                            self.toast("รถลื่นคราบเลือด!", ACCENT_COLOR)
                         break
+
         # crashes between cars
-        for i, a in enumerate(road):
-            for b in road[i + 1:]:
-                if a.wreck and b.wreck:
+        for first_index, first_car in enumerate(active_road_cars):
+            # Compare each car pair once by taking only cars after the current index.
+            # ตรวจรถแต่ละคู่ครั้งเดียว เช่น ตรวจคู่ A-B แล้วไม่ต้องตรวจ B-A ซ้ำ
+            for second_car in active_road_cars[first_index + 1:]:
+                if first_car.wreck and second_car.wreck:
                     continue
-                if a.skid <= 0 and b.skid <= 0:
+                if first_car.skid <= 0 and second_car.skid <= 0:
                     continue                      # normal traffic keeps its distance; only skids crash
-                if (abs(a.x - b.x) < (a.length + b.length) / 2 - 6 and abs(a.y - b.y) < (a.width + b.width) / 2 - 4):
-                    self.crash(a, b)
-        for d in self.drones:
-            d.update(dt)
-        gone = {id(d.car) for d in self.drones if d.done}
-        self.drones = [d for d in self.drones if not d.done]
-        self.cars = [c for c in self.cars if id(c) not in gone and (c.wreck or c.towed or -c.length * 2 < c.x < W + c.length * 2)]
+                if (abs(first_car.x - second_car.x) < (first_car.length + second_car.length) / 2 - 6 and abs(first_car.y - second_car.y) < (first_car.width + second_car.width) / 2 - 4):
+                    self.crash(first_car, second_car)
 
-    def juice(self, shake=0.0, hitstop=0.0, flash=0.0):
-        self.active_surface_shake_strength = max(self.active_surface_shake_strength, shake)
-        self.hitstop_remaining = max(self.hitstop_remaining, hitstop)
-        self.flash_intensity = max(self.flash_intensity, flash)
+        for drone in self.drones:
+            drone.update(delta_time)
+        done_car_identifiers = {id(drone.car) for drone in self.drones if drone.done}
+        self.drones = [drone for drone in self.drones if not drone.done]
+        self.cars = [
+            car for car in self.cars
+            if id(car) not in done_car_identifiers and (car.wreck or car.towed or -car.length * 2 < car.x < SCREEN_WIDTH + car.length * 2)
+        ]
 
-    def impact_text(self, x, y, text, col=ACCENT, size=1.0):
-        stack = sum(1 for im in self.impact_messages if abs(im[0] - x) < 120 and abs(im[1] - y) < 80)
-        self.impact_messages.append([x, y, text, 0.9, col, size, random.uniform(-12, 12), stack * 38])
+    # Combine impact effects by taking the strongest active value, so weaker hits do not cancel stronger ones.
+    def juice(self, shake_strength=0.0, hitstop_seconds=0.0, flash_intensity=0.0):
+        self.active_surface_shake_strength = max(self.active_surface_shake_strength, shake_strength)
+        self.hitstop_remaining = max(self.hitstop_remaining, hitstop_seconds)
+        self.flash_intensity = max(self.flash_intensity, flash_intensity)
 
-    def debris(self, c, n=8):
+    def impact_text(self, world_x, world_y, text, color=ACCENT_COLOR, size=1.0):
+        # Count nearby impact labels and shift the new one upward by 38 units per label to reduce overlap.
+        stack = sum(1 for impact_message in self.impact_messages if abs(impact_message[0] - world_x) < 120 and abs(impact_message[1] - world_y) < 80)
+        self.impact_messages.append([world_x, world_y, text, 0.9, color, size, random.uniform(-12, 12), stack * 38])
+
+    # Particles spread outward with velocity components cos(angle)*speed and sin(angle)*speed.
+    # The y component is compressed for the scene style; upward velocity makes debris arc.
+    def debris(self, car, count=8):
         """Car parts flying off: body panels, glass and a wheel or two."""
-        for i in range(n):
-            a = random.uniform(0, math.tau)
-            sp = random.uniform(80, 260)
-            col = random.choice([c.col, shade(c.col, 0.7), (60, 62, 66)])
-            self.particles.append(Particle(c.x, c.y, c.height * 0.6, math.cos(a) * sp, math.sin(a) * sp * 0.6,
-                                           random.uniform(150, 320), col, random.uniform(4, 7),
-                                           random.uniform(1.6, 2.6), grav=700, shape="chunk"))
+        for _ in range(count):
+            angle = random.uniform(0, math.tau)
+            speed_value = random.uniform(80, 260)
+            particle_color = random.choice([car.color, shade(car.color, 0.7), (60, 62, 66)])
+            self.particles.append(Particle(
+                car.x,
+                car.y,
+                car.height * 0.6,
+                math.cos(angle) * speed_value,
+                math.sin(angle) * speed_value * 0.6,
+                random.uniform(150, 320),
+                particle_color,
+                random.uniform(4, 7),
+                random.uniform(1.6, 2.6),
+                gravity=700,
+                shape="chunk"
+            ))
         for _ in range(random.randint(1, 2)):
-            a = random.uniform(0, math.tau)
-            self.particles.append(Particle(c.x, c.y, 10, math.cos(a) * 200, math.sin(a) * 120, 260,
-                                           (28, 28, 32), 6, 2.6, grav=700, shape="wheel"))
+            angle = random.uniform(0, math.tau)
+            self.particles.append(Particle(
+                car.x,
+                car.y,
+                10,
+                math.cos(angle) * 200,
+                math.sin(angle) * 120,
+                260,
+                (28, 28, 32),
+                6,
+                2.6,
+                gravity=700,
+                shape="wheel"
+            ))
         for _ in range(10):
-            a = random.uniform(0, math.tau)
-            sp = random.uniform(60, 200)
-            self.particles.append(Particle(c.x, c.y, c.height * 0.8, math.cos(a) * sp, math.sin(a) * sp * 0.6,
-                                           random.uniform(60, 180), random.choice([(180, 220, 240), (230, 245, 255)]),
-                                           2, 0.9))
+            angle = random.uniform(0, math.tau)
+            speed_value = random.uniform(60, 200)
+            self.particles.append(Particle(
+                car.x,
+                car.y,
+                car.height * 0.8,
+                math.cos(angle) * speed_value,
+                math.sin(angle) * speed_value * 0.6,
+                random.uniform(60, 180),
+                random.choice([(180, 220, 240), (230, 245, 255)]),
+                2,
+                0.9
+            ))
 
-    def skid_marks(self, c):
-        pts = [local(c.x, c.y, c.ang, -c.length * 0.32, ly) for ly in (-c.width / 2 + 3, c.width / 2 - 3)]
-        if c.skid_points:
-            for a, b in zip(c.skid_points, pts):
-                pygame.draw.line(self.skid_mark_surface, (22, 22, 26, 120), proj(*a), proj(*b), 4 if c.width > 30 else 2)
-        c.skid_points = pts
+    # Join each wheel position to its previous-frame position to draw continuous tire trails.
+    def skid_marks(self, car):
+        points = [local(car.x, car.y, car.angle, -car.length * 0.32, local_y) for local_y in (-car.width / 2 + 3, car.width / 2 - 3)]
+        if car.skid_points:
+            for old_point, new_point in zip(car.skid_points, points):
+                pygame.draw.line(self.skid_mark_surface, (22, 22, 26, 120), project(*old_point), project(*new_point), 4 if car.width > 30 else 2)
+        car.skid_points = points
 
     def crash(self, *cars):
-        mx = sum(c.x for c in cars) / len(cars)
-        my = sum(c.y for c in cars) / len(cars)
-        for c in cars:
-            if c.wreck or c.towed:
+        # Crash center = average of the involved car centers; shared debris and messages appear here.
+        mean_x = sum(car.x for car in cars) / len(cars)
+        mean_y = sum(car.y for car in cars) / len(cars)
+        for car in cars:
+            if car.wreck or car.towed:
                 continue
-            c.wreck = True
-            c.speed, c.skid, c.lateral_speed = 0, 0, 0
-            c.heading += random.uniform(-0.3, 0.3)
-            c.col = shade(c.col, 0.7)
-            self.drones.append(Drone(c))
-            self.debris(c)
-            if c.kind == "icecream":
+            car.wreck = True
+            car.speed, car.skid, car.lateral_speed = 0, 0, 0
+            car.heading += random.uniform(-0.3, 0.3)
+            car.color = shade(car.color, 0.7)
+            self.drones.append(Drone(car))
+            self.debris(car)
+            if car.kind == "icecream":
                 for _ in range(4):                       # ice cream all over the road (slippery!)
-                    col = random.choice(ICECREAM_GOO)
-                    self.blood_puddles.append(Puddle(c.x + random.uniform(-50, 50), c.y + random.uniform(-25, 25),
-                                               random.uniform(20, 28), col, shade(col, 1.15)))
+                    goo_color = random.choice(ICECREAM_GOO)
+                    self.blood_puddles.append(Puddle(
+                        car.x + random.uniform(-50, 50),
+                        car.y + random.uniform(-25, 25),
+                        random.uniform(20, 28),
+                        goo_color,
+                        shade(goo_color, 1.15)
+                    ))
                 for _ in range(14):
-                    a = random.uniform(0, math.tau)
-                    self.particles.append(Particle(c.x, c.y, c.height + 20, math.cos(a) * 150, math.sin(a) * 90,
-                                                   random.uniform(150, 280), random.choice(ICECREAM_GOO),
-                                                   random.uniform(4, 7), 1.4))
-                self.impact_text(c.x, c.y - 20, "ไอติมเละ!", (250, 190, 212), 0.9)
-            elif c.kind == "tanker":
-                c.fuse = 0.9                              # leaking... about to blow
-                self.impact_text(c.x, c.y - 20, "น้ำมันรั่ว!", BAD, 0.9)
-            elif c.kind in ("moto", "sidecar"):
-                c.heading += random.uniform(0.6, 1.2) * random.choice([-1, 1])   # bike falls over
-        self.juice(shake=11, hitstop=0.09, flash=0.35)
-        self.impact_text(mx, my, "โครม!", ACCENT, 1.2)
+                    angle = random.uniform(0, math.tau)
+                    self.particles.append(Particle(
+                        car.x,
+                        car.y,
+                        car.height + 20,
+                        math.cos(angle) * 150,
+                        math.sin(angle) * 90,
+                        random.uniform(150, 280),
+                        random.choice(ICECREAM_GOO),
+                        random.uniform(4, 7),
+                        1.4
+                    ))
+                self.impact_text(car.x, car.y - 20, "ไอติมเละ!", (250, 190, 212), 0.9)
+            elif car.kind == "tanker":
+                car.fuse = 0.9                              # leaking... about to blow
+                self.impact_text(car.x, car.y - 20, "น้ำมันรั่ว!", BAD_COLOR, 0.9)
+            elif car.kind in ("moto", "sidecar"):
+                car.heading += random.uniform(0.6, 1.2) * random.choice([-1, 1])   # bike falls over
+        self.juice(shake_strength=11, hitstop_seconds=0.09, flash_intensity=0.35)
+        self.impact_text(mean_x, mean_y, "โครม!", ACCENT_COLOR, 1.2)
         for _ in range(26):
-            a = random.uniform(0, math.tau)
-            sp = random.uniform(60, 220)
-            self.particles.append(Particle(mx, my, 20, math.cos(a) * sp, math.sin(a) * sp * 0.6,
-                                           random.uniform(80, 220),
-                                           random.choice([(255, 220, 120), (200, 200, 205), (120, 170, 220), (60, 60, 64)]),
-                                           random.uniform(2, 4), 0.8))
-        self.toast("รถชนกัน! โดรนกำลังมายกออก", ACCENT)
+            angle = random.uniform(0, math.tau)
+            speed_value = random.uniform(60, 220)
+            self.particles.append(Particle(
+                mean_x,
+                mean_y,
+                20,
+                math.cos(angle) * speed_value,
+                math.sin(angle) * speed_value * 0.6,
+                random.uniform(80, 220),
+                random.choice([(255, 220, 120), (200, 200, 205), (120, 170, 220), (60, 60, 64)]),
+                random.uniform(2, 4),
+                0.8
+            ))
+        self.toast("รถชนกัน! โดรนกำลังมายกออก", ACCENT_COLOR)
 
-    def update_person(self, p, dt):
-        if not p.alive or p.carried_by:
+    def update_person(self, person, delta_time):
+        if not person.alive or person.carried_by:
             return
-        p.cd = max(0.0, p.cd - dt)
-        p.sign_t = max(0.0, p.sign_t - dt)
-        p.slip_immune = max(0.0, p.slip_immune - dt)
-        if p.dash > 0:
-            p.dash -= dt
-            if p.dash <= 0:
-                p.tired = 1.2
-        elif p.tired > 0:
-            p.tired -= dt
-        if p.down_t > 0:
-            p.down_t -= dt
-        old = (p.x, p.y)
-        if p.slip_t > 0:
-            p.slip_t -= dt
-            p.x = clamp(p.x + p.slip_v[0] * dt, 10, W - 10)
-            p.y = clamp(p.y + p.slip_v[1] * dt, 16, WORLD_BOT - 10)
-            p.slip_v = (p.slip_v[0] * (1 - 3 * dt), p.slip_v[1] * (1 - 3 * dt))
-        elif p.down_t > 0:
+        person.cooldown = max(0.0, person.cooldown - delta_time)
+        person.sign_time = max(0.0, person.sign_time - delta_time)
+        person.slip_immune = max(0.0, person.slip_immune - delta_time)
+        if person.dash > 0:
+            person.dash -= delta_time
+            if person.dash <= 0:
+                person.tired = 1.2
+        elif person.tired > 0:
+            person.tired -= delta_time
+        if person.down_time > 0:
+            person.down_time -= delta_time
+        old_position = (person.x, person.y)
+
+        if person.slip_time > 0:
+            person.slip_time -= delta_time
+            person.x = clamp(person.x + person.slip_velocity[0] * delta_time, 10, SCREEN_WIDTH - 10)
+            person.y = clamp(person.y + person.slip_velocity[1] * delta_time, 16, WORLD_BOTTOM - 10)
+            # Reduce sliding velocity by a time-scaled fraction to model friction.
+            # ลดความเร็วลื่นลงทีละเฟรมเพื่อเลียนแบบแรงเสียดทาน
+            person.slip_velocity = (person.slip_velocity[0] * (1 - 3 * delta_time), person.slip_velocity[1] * (1 - 3 * delta_time))
+        elif person.down_time > 0:
             pass
-        elif p.saved:
-            self.step_towards(p, dt, p.speed() * 0.7)
+        elif person.saved:
+            self.step_towards(person, delta_time, person.speed() * 0.7)
         else:
             # the kid panics when nobody is close
-            if p.kind == "kid":
-                near = any(q is not p and q.alive and math.hypot(q.x - p.x, q.y - p.y) < 75 for q in self.people)
-                p.alone_t = 0 if near else p.alone_t + dt
-                if p.alone_t > 2.0 and not p.panic:
-                    p.panic = True
-                    self.toast("เด็กอยู่คนเดียว ตกใจเดินมั่ว!", BAD)
-                elif near and p.panic:
-                    p.panic = False
-                    p.path = []
-            if p.panic:
-                p.wander_t -= dt
-                if p.wander_t <= 0:
-                    a = random.uniform(0, math.tau)
-                    p.wander = (math.cos(a), math.sin(a))
-                    p.wander_t = random.uniform(0.4, 0.9)
-                s = p.speed() * 0.6
-                self.move_constrained(p, p.x + p.wander[0] * s * dt, p.y + p.wander[1] * s * dt)
+            if person.kind == "kid":
+                near = any(
+                    other_person is not person and other_person.alive and math.hypot(other_person.x - person.x, other_person.y - person.y) < 75
+                    for other_person in self.people
+                )
+                # Reset the timer when somebody is near; otherwise accumulate seconds until the child panics.
+                person.alone_time = 0 if near else person.alone_time + delta_time
+                if person.alone_time > 2.0 and not person.panic:
+                    person.panic = True
+                    self.toast("เด็กอยู่คนเดียว ตกใจเดินมั่ว!", BAD_COLOR)
+                elif near and person.panic:
+                    person.panic = False
+                    person.path = []
+            if person.panic:
+                person.wander_time -= delta_time
+                if person.wander_time <= 0:
+                    wander_angle = random.uniform(0, math.tau)
+                    # cos(angle), sin(angle) form a unit vector, giving a random direction without changing walking speed.
+                    person.wander_direction = (math.cos(wander_angle), math.sin(wander_angle))
+                    person.wander_time = random.uniform(0.4, 0.9)
+                walk_speed = person.speed() * 0.6
+                self.move_constrained(
+                    person,
+                    person.x + person.wander_direction[0] * walk_speed * delta_time,
+                    person.y + person.wander_direction[1] * walk_speed * delta_time
+                )
             else:
-                if p.go and not p.path:
-                    self.plan_crossing(p)       # keep going after getting back up
-                self.step_towards(p, dt, p.speed())
-        p.moving = math.hypot(p.x - old[0], p.y - old[1]) > 0.05
-        if p.moving:
-            p.walk += dt * (1.6 if p.dash > 0 else 1)
-            if abs(p.x - old[0]) > 0.05:
-                p.facing = 1 if p.x > old[0] else -1
+                if person.is_walking and not person.path:
+                    self.plan_crossing(person)       # keep going after getting back up
+                self.step_towards(person, delta_time, person.speed())
+
+        person.moving = math.hypot(person.x - old_position[0], person.y - old_position[1]) > 0.05
+        if person.moving:
+            person.walk_phase += delta_time * (1.6 if person.dash > 0 else 1)
+            if abs(person.x - old_position[0]) > 0.05:
+                person.facing = 1 if person.x > old_position[0] else -1
+
         # slipping on blood
-        if p.slip_t <= 0 and p.slip_immune <= 0 and p.moving and p.down_t <= 0:
-            for pd in self.blood_puddles:
-                if math.hypot(p.x - pd.x, p.y - pd.y) < pd.r * 0.8:
-                    dx, dy = p.x - old[0], p.y - old[1]
-                    ln = math.hypot(dx, dy) or 1
-                    p.slip_t = 0.45
-                    p.slip_immune = 1.2
-                    p.slip_v = (dx / ln * 190, dy / ln * 190)
-                    p.path = []
-                    self.float_text(p.x, p.y, "ลื่น!", ACCENT)
+        if person.slip_time <= 0 and person.slip_immune <= 0 and person.moving and person.down_time <= 0:
+            for puddle in self.blood_puddles:
+                if math.hypot(person.x - puddle.x, person.y - puddle.y) < puddle.radius * 0.8:
+                    delta_x, delta_y = person.x - old_position[0], person.y - old_position[1]
+                    # Normalize the latest movement direction, then multiply by 190 to set slipping speed.
+                    # Use 1 for a zero distance to avoid division by zero.
+                    distance = math.hypot(delta_x, delta_y) or 1
+                    person.slip_time = 0.45
+                    person.slip_immune = 1.2
+                    person.slip_velocity = (delta_x / distance * 190, delta_y / distance * 190)
+                    person.path = []
+                    self.float_text(person.x, person.y, "ลื่น!", ACCENT_COLOR)
                     break
+
         # walking through fire sets you alight
-        if not p.saved:
-            for f in self.fires:
-                if math.hypot(p.x - f.x, (p.y - f.y) * 1.3) < f.r * 0.7:
-                    if p.burn_t <= 0:
-                        self.toast(f"{p.info['name']}ติดไฟ!", BAD)
-                    p.burn_t = max(p.burn_t, 1.2)
+        if not person.saved:
+            for fire in self.fires:
+                if math.hypot(person.x - fire.x, (person.y - fire.y) * 1.3) < fire.radius * 0.7:
+                    if person.burn_time <= 0:
+                        self.toast(f"{person.information['name']}ติดไฟ!", BAD_COLOR)
+                    person.burn_time = max(person.burn_time, 1.2)
                     break
+
         # reached the safe zone
-        if not p.saved and p.y < GOAL_Y - 6:
-            p.burn_t = 0
-            self.save(p)
+        if not person.saved and person.y < GOAL_Y - 6:
+            person.burn_time = 0
+            self.save(person)
 
-    def step_towards(self, p, dt, speed):
-        if not p.path:
+    def step_towards(self, person, delta_time, speed_value):
+        if not person.path:
             return
-        tx, ty = p.path[0]
-        dx, dy = tx - p.x, ty - p.y
-        d = math.hypot(dx, dy)
-        step = speed * dt
-        if d <= step:
-            self.move_constrained(p, tx, ty)
-            p.path.pop(0)
+        target_x, target_y = person.path[0]
+        delta_x = target_x - person.x
+        delta_y = target_y - person.y
+        distance = math.hypot(delta_x, delta_y)
+        # Maximum distance this frame = speed * seconds. Snap to nearby waypoints to avoid walking past them.
+        step = speed_value * delta_time
+        if distance <= step:
+            self.move_constrained(person, target_x, target_y)
+            person.path.pop(0)
         else:
-            self.move_constrained(p, p.x + dx / d * step, p.y + dy / d * step)
+            # Divide the target vector by its length to get direction, then multiply by this frame distance.
+            # หารระยะในแต่ละแกนด้วยระยะรวมเพื่อหาทิศ แล้วคูณระยะที่เดินได้ในเฟรมนี้
+            self.move_constrained(person, person.x + delta_x / distance * step, person.y + delta_y / distance * step)
 
-    def move_constrained(self, p, nx, ny):
-        nx = clamp(nx, 10, W - 10)
-        ny = clamp(ny, 16, WORLD_BOT - 10)
-        if p.saved:
-            p.x, p.y = nx, min(ny, GOAL_Y - 8)
+    # Keep people inside world bounds and prevent road entry outside the zebra crossing.
+    def move_constrained(self, person, next_x, next_y):
+        next_x = clamp(next_x, 10, SCREEN_WIDTH - 10)
+        next_y = clamp(next_y, 16, WORLD_BOTTOM - 10)
+        if person.saved:
+            person.x, person.y = next_x, min(next_y, GOAL_Y - 8)
             return
-        if in_road(ny):
-            if not in_road(p.y) and not in_band(nx):
-                ny = p.y                      # can't step off the curb outside the crossing
-            elif in_road(p.y) and in_band(p.x):
-                nx = clamp(nx, CW_X0 + 4, CW_X1 - 4)
-        p.x, p.y = nx, ny
+        if in_road(next_y):
+            if not in_road(person.y) and not in_band(next_x):
+                next_y = person.y                      # can't step off the curb outside the crossing
+            elif in_road(person.y) and in_band(person.x):
+                next_x = clamp(next_x, CROSSING_START_X + 4, CROSSING_END_X - 4)
+        person.x, person.y = next_x, next_y
 
-    def save(self, p):
-        p.saved = True
-        p.go = False
-        p.go = False
-        p.panic = False
-        slot = sum(1 for q in self.people if q.saved)
-        p.path = [(220 + (slot % 6) * 100 + random.uniform(-10, 10), 40 + (slot // 6) * 34)]
-        self.float_text(p.x, p.y, "ปลอดภัย!", GOOD)
-        if p.carrying:
-            c = p.carrying
-            p.carrying = None
-            c.carried_by = None
-            c.x, c.y = p.x + 12, p.y
-            self.save(c)
+    def save(self, person):
+        person.saved = True
+        person.is_walking = False
+        person.panic = False
+        # Count saved people, then use modulo and floor division to arrange them in rows of six.
+        saved_slot = sum(1 for other_person in self.people if other_person.saved)
+        person.path = [(220 + (saved_slot % 6) * 100 + random.uniform(-10, 10), 40 + (saved_slot // 6) * 34)]
+        self.float_text(person.x, person.y, "ปลอดภัย!", GOOD_COLOR)
+        if person.carrying:
+            carried_person = person.carrying
+            person.carrying = None
+            carried_person.carried_by = None
+            carried_person.x, carried_person.y = person.x + 12, person.y
+            self.save(carried_person)
 
     def check_hits(self):
-        for c in self.cars:
-            if not c.dangerous():
+        for car in self.cars:
+            if not car.dangerous():
                 continue
-            for p in self.people:
-                if (p.alive and not p.saved and p.carried_by is None and p.invuln <= 0
-                        and c.hits(p.x, p.y, 7)):
-                    self.car_hit(p, c)
+            for person in self.people:
+                if (person.alive and not person.saved and person.carried_by is None and person.invulnerable_time <= 0
+                        and car.hits(person.x, person.y, 7)):
+                    self.car_hit(person, car)
 
-    def car_hit(self, p, c):
-        speed_f = clamp(c.speed / 180, 0.5, 1.4)
-        dmg = VEHICLES[c.kind]["dmg"] * speed_f + (10 if c.skid > 0 else 0)
-        self.juice(shake=5, hitstop=0.04)
-        self.impact_text(p.x, p.y, "ปั้ก!", (255, 255, 255), 0.7)
-        push = (c.dir * (140 + c.speed * 0.6), random.uniform(-70, 70))
-        p.invuln = 1.6
-        if c.skid <= 0:                      # the driver slams on the brakes
-            c.speed *= 0.3
-            c.stall = max(c.stall, 1.0)
-        self.damage(p, dmg, "car", push)
-        if p.fuel:                           # the fuel can bursts on impact
-            p.fuel = False
-            self.explode(p.x, p.y)
+    def car_hit(self, person, car):
+        # Scale base hit damage by speed/180, limited to 0.5..1.4; skidding adds 10 extra damage.
+        speed_factor = clamp(car.speed / 180, 0.5, 1.4)
+        damage_amount = VEHICLES[car.kind]["damage"] * speed_factor + (10 if car.skid > 0 else 0)
+        self.juice(shake_strength=5, hitstop_seconds=0.04)
+        self.impact_text(person.x, person.y, "ปั้ก!", (255, 255, 255), 0.7)
+        push_velocity = (car.direction * (140 + car.speed * 0.6), random.uniform(-70, 70))
+        person.invulnerable_time = 1.6
+        if car.skid <= 0:                      # the driver slams on the brakes
+            car.speed *= 0.3
+            car.stall = max(car.stall, 1.0)
+        self.damage(person, damage_amount, "car", push_velocity)
+        if person.fuel:                           # the fuel can bursts on impact
+            person.fuel = False
+            self.explode(person.x, person.y)
 
-    def damage(self, p, amount, source, push=None):
+    def damage(self, person, amount, source, push_velocity=None):
         """source: 'car', 'fire' (explosion), 'burn' (on fire, per frame)."""
-        if not p.alive or p.saved:
+        if not person.alive or person.saved:
             return
-        p.hp -= amount
+        person.health -= amount
         if source != "burn":
-            p.hurt_t = 0.4
-            self.float_text(p.x, p.y, f"-{int(amount)}", BAD)
+            person.hurt_time = 0.4
+            self.float_text(person.x, person.y, f"-{int(amount)}", BAD_COLOR)
             for _ in range(8):
-                a = random.uniform(0, math.tau)
-                sp = random.uniform(30, 120)
-                self.particles.append(Particle(p.x, p.y, 18, math.cos(a) * sp, math.sin(a) * sp * 0.6,
-                                               random.uniform(60, 160), random.choice([BLOOD, BLOOD_HI]),
-                                               random.uniform(2, 3), 0.8))
+                angle = random.uniform(0, math.tau)
+                speed_value = random.uniform(30, 120)
+                self.particles.append(Particle(
+                    person.x,
+                    person.y,
+                    18,
+                    math.cos(angle) * speed_value,
+                    math.sin(angle) * speed_value * 0.6,
+                    random.uniform(60, 160),
+                    random.choice([BLOOD, BLOOD_HIGHLIGHT]),
+                    random.uniform(2, 3),
+                    0.8
+                ))
         if source == "car":
-            self.blood_puddles.append(Puddle(p.x, p.y, 15))
-        if push:                              # knocked off your feet
-            p.slip_t, p.slip_v = 0.4, push
-            p.slip_immune = 1.0
-            p.down_t = 1.1
-            p.fall_dir = 1 if push[0] >= 0 else -1
-            p.path = []
-            p.panic = False
-            if p.carrying:
-                c = p.carrying
-                p.carrying = None
-                c.carried_by = None
-                c.x, c.y = p.x + 14, p.y + 8
-                c.down_t, c.fall_dir = 1.0, p.fall_dir
-        if p.hp <= 0:
-            self.die(p, source)
+            self.blood_puddles.append(Puddle(person.x, person.y, 15))
+        if push_velocity:                              # knocked off your feet
+            person.slip_time = 0.4
+            person.slip_velocity = push_velocity
+            person.slip_immune = 1.0
+            person.down_time = 1.1
+            person.fall_direction = 1 if push_velocity[0] >= 0 else -1
+            person.path = []
+            person.panic = False
+            if person.carrying:
+                carried_person = person.carrying
+                person.carrying = None
+                carried_person.carried_by = None
+                carried_person.x = person.x + 14
+                carried_person.y = person.y + 8
+                carried_person.down_time = 1.0
+                carried_person.fall_direction = person.fall_direction
+        if person.health <= 0:
+            self.die(person, source)
             return
         if source == "car":
-            self.toast(f"{p.info['name']}โดนชน!  HP เหลือ {int(p.hp)}", BAD)
-            if p.injured:
-                self.float_text(p.x, p.y - 10, "บาดเจ็บหนัก", BAD)
+            self.toast(f"{person.information['name']}โดนชน!  HP เหลือ {int(person.health)}", BAD_COLOR)
+            if person.injured:
+                self.float_text(person.x, person.y - 10, "บาดเจ็บหนัก", BAD_COLOR)
 
-    def die(self, p, source):
-        p.hp = 0
-        p.alive = False
-        p.go = False
-        p.path = []
-        p.burn_t = 0
-        p.death_t = 0.0
-        p.death_kind = "fire" if source in ("fire", "burn") else "car"
-        if p.death_kind == "car":
-            self.blood_puddles.append(Puddle(p.x, p.y, 26))
-            self.toast(f"{p.info['name']}เสียชีวิต", BAD)
+    def die(self, person, source):
+        person.health = 0
+        person.alive = False
+        person.is_walking = False
+        person.path = []
+        person.burn_time = 0
+        person.death_time = 0.0
+        person.death_cause = "fire" if source in ("fire", "burn") else "car"
+        if person.death_cause == "car":
+            self.blood_puddles.append(Puddle(person.x, person.y, 26))
+            self.toast(f"{person.information['name']}เสียชีวิต", BAD_COLOR)
         else:
-            p.char = 1.0
-            self.toast(f"{p.info['name']}ถูกไฟคลอกเสียชีวิต", BAD)
-        if p.carrying:
-            c = p.carrying
-            p.carrying = None
-            c.carried_by = None
-            c.x, c.y = p.x + 16, p.y + 10
-        if p.carried_by:
-            p.carried_by.carrying = None
-            p.carried_by = None
-        if p.fuel:
-            p.fuel = False
-            self.explode(p.x, p.y)
+            person.charring_level = 1.0
+            self.toast(f"{person.information['name']}ถูกไฟคลอกเสียชีวิต", BAD_COLOR)
+        if person.carrying:
+            carried_person = person.carrying
+            person.carrying = None
+            carried_person.carried_by = None
+            carried_person.x = person.x + 16
+            carried_person.y = person.y + 10
+        if person.carried_by:
+            person.carried_by.carrying = None
+            person.carried_by = None
+        if person.fuel:
+            person.fuel = False
+            self.explode(person.x, person.y)
 
-    def explode(self, x, y, power=1.0):
-        big = power > 1.2
-        self.toast("รถขนน้ำมันระเบิด!" if big else "ถังน้ำมันระเบิด!", BAD)
-        self.fires.append(Fire(x, y, 58 * power))
-        self.juice(shake=16 * power, hitstop=0.12 * power, flash=0.6 if big else 0.45)
-        self.impact_text(x, y, "ตูม!!", (255, 150, 40), 1.3 * power)
-        R = 90 * min(power, 1.35)                     # people-damage radius (visuals stay big)
+    def explode(self, world_x, world_y, power=1.0):
+        is_big = power > 1.2
+        self.toast("รถขนน้ำมันระเบิด!" if is_big else "ถังน้ำมันระเบิด!", BAD_COLOR)
+        self.fires.append(Fire(world_x, world_y, 58 * power))
+        self.juice(shake_strength=16 * power, hitstop_seconds=0.12 * power, flash_intensity=0.6 if is_big else 0.45)
+        self.impact_text(world_x, world_y, "ตูม!!", (255, 150, 40), 1.3 * power)
+        # Explosion power increases the damage radius, but the radius multiplier is capped at 1.35.
+        blast_radius = 90 * min(power, 1.35)                     # people-damage radius (visuals stay big)
         for _ in range(int(60 * power)):
-            a = random.uniform(0, math.tau)
-            sp = random.uniform(60, 320) * power
-            self.particles.append(Particle(x, y, 10, math.cos(a) * sp, math.sin(a) * sp * 0.6,
-                                           random.uniform(100, 380),
-                                           random.choice([(255, 210, 80), (255, 140, 30), (230, 70, 30), (90, 90, 90)]),
-                                           random.uniform(3, 7), random.uniform(0.6, 1.3)))
-        for q in self.people:
-            d = math.hypot(q.x - x, q.y - y)
-            if q.alive and not q.saved and d < R and q.carried_by is None:
-                ln = d or 1
-                push = ((q.x - x) / ln * 320, (q.y - y) / ln * 320)
-                q.burn_t = max(q.burn_t, 1.5)
-                chain = q.fuel
-                q.fuel = False
-                self.damage(q, 10 + 40 * (1 - d / R), "fire", push)
-                if chain:
-                    self.explode(q.x, q.y)
-        for c in list(self.cars):
-            if c.towed or c.wreck:
+            angle = random.uniform(0, math.tau)
+            speed_value = random.uniform(60, 320) * power
+            self.particles.append(Particle(
+                world_x,
+                world_y,
+                10,
+                math.cos(angle) * speed_value,
+                math.sin(angle) * speed_value * 0.6,
+                random.uniform(100, 380),
+                random.choice([(255, 210, 80), (255, 140, 30), (230, 70, 30), (90, 90, 90)]),
+                random.uniform(3, 7),
+                random.uniform(0.6, 1.3)
+            ))
+        for person in self.people:
+            distance = math.hypot(person.x - world_x, person.y - world_y)
+            if person.alive and not person.saved and distance < blast_radius and person.carried_by is None:
+                line_distance = distance or 1
+                # Normalize the direction away from the explosion and multiply by 320 for outward knockback.
+                push_velocity = ((person.x - world_x) / line_distance * 320, (person.y - world_y) / line_distance * 320)
+                person.burn_time = max(person.burn_time, 1.5)
+                had_fuel = person.fuel
+                person.fuel = False
+                # Linear damage falloff: 50 at the center, approaching 10 at the edge of the blast radius.
+                # ยิ่งไกลจากจุดระเบิดยิ่งเสียพลังชีวิตน้อย: กลางวงเสีย 50 และใกล้ขอบวงเสียประมาณ 10
+                self.damage(person, 10 + 40 * (1 - distance / blast_radius), "fire", push_velocity)
+                if had_fuel:
+                    self.explode(person.x, person.y)
+        for car in list(self.cars):
+            if car.towed or car.wreck:
                 continue
-            d = math.hypot(c.x - x, c.y - y)
-            if d < 80 * power:
-                self.crash(c)
-            elif d < 140 * power and c.skid <= 0:
-                c.skid = 0.6
-                c.lateral_speed = (c.y - y) / (d or 1) * 120
+            distance = math.hypot(car.x - world_x, car.y - world_y)
+            if distance < 80 * power:
+                self.crash(car)
+            elif distance < 140 * power and car.skid <= 0:
+                car.skid = 0.6
+                car.lateral_speed = (car.y - world_y) / (distance or 1) * 120
 
-    def animate_person(self, p, dt):
+    def animate_person(self, person, delta_time):
         """Pose, hurt flash, burning and death animation (runs for alive and dead)."""
-        p.hurt_t = max(0.0, p.hurt_t - dt)
-        p.invuln = max(0.0, p.invuln - dt)
-        bx, by = (p.carried_by.x, p.carried_by.y) if p.carried_by else (p.x, p.y)
-        if not p.alive:
-            p.death_t += dt
-            p.pose += (math.pi / 2 - p.pose) * min(1.0, dt * 6)
-            if p.death_kind == "fire" and p.death_t < 3.5 and random.random() < 0.4:
-                self.particles.append(Particle(bx + random.uniform(-12, 12), by, 6, random.uniform(-8, 8), 0,
-                                               random.uniform(20, 40), (70, 70, 74), random.uniform(3, 6),
-                                               1.4, grav=-10))
+        person.hurt_time = max(0.0, person.hurt_time - delta_time)
+        person.invulnerable_time = max(0.0, person.invulnerable_time - delta_time)
+        if person.carried_by:
+            body_x, body_y = person.carried_by.x, person.carried_by.y
+        else:
+            body_x, body_y = person.x, person.y
+        if not person.alive:
+            person.death_time += delta_time
+            person.pose += (math.pi / 2 - person.pose) * min(1.0, delta_time * 6)
+            if person.death_cause == "fire" and person.death_time < 3.5 and random.random() < 0.4:
+                self.particles.append(Particle(
+                    body_x + random.uniform(-12, 12),
+                    body_y,
+                    6,
+                    random.uniform(-8, 8),
+                    0,
+                    random.uniform(20, 40),
+                    (70, 70, 74),
+                    random.uniform(3, 6),
+                    1.4,
+                    gravity=-10
+                ))
             return
-        lying = p.down_t > 0 or p.carried_by is not None
-        target = math.pi / 2 if lying else (0.22 if (p.dash > 0 or p.burn_t > 0) and p.moving else 0.0)
-        p.pose += (target - p.pose) * min(1.0, dt * (14 if lying else 6))
-        if p.burn_t > 0 and not p.saved:
-            p.burn_t -= dt
-            p.char = min(1.0, p.char + dt * 0.2)
+        is_lying = person.down_time > 0 or person.carried_by is not None
+        # Body angles use radians: 0 is upright and pi/2 is lying down. Ease toward the target pose.
+        target_pose = math.pi / 2 if is_lying else (0.22 if (person.dash > 0 or person.burn_time > 0) and person.moving else 0.0)
+        person.pose += (target_pose - person.pose) * min(1.0, delta_time * (14 if is_lying else 6))
+        if person.burn_time > 0 and not person.saved:
+            person.burn_time -= delta_time
+            person.charring_level = min(1.0, person.charring_level + delta_time * 0.2)
             if random.random() < 0.7:
-                self.particles.append(Particle(bx + random.uniform(-7, 7), by + random.uniform(-3, 3),
-                                               random.uniform(8, 30), random.uniform(-10, 10), 0,
-                                               random.uniform(40, 80),
-                                               random.choice([(255, 150, 40), (255, 90, 30), (255, 220, 90)]),
-                                               random.uniform(2, 4), 0.45, grav=-30))
-            self.damage(p, 8 * dt, "burn")
-        elif p.injured and not p.saved:
-            p.drip_t -= dt
-            if p.drip_t <= 0:
-                p.drip_t = random.uniform(0.3, 0.7)
-                self.particles.append(Particle(bx + random.uniform(-4, 4), by, 14, 0, 0, 0,
-                                               BLOOD, 2, 1.2))
+                self.particles.append(Particle(
+                    body_x + random.uniform(-7, 7),
+                    body_y + random.uniform(-3, 3),
+                    random.uniform(8, 30),
+                    random.uniform(-10, 10),
+                    0,
+                    random.uniform(40, 80),
+                    random.choice([(255, 150, 40), (255, 90, 30), (255, 220, 90)]),
+                    random.uniform(2, 4),
+                    0.45,
+                    gravity=-30
+                ))
+            # Burn damage is 8 health per second; multiplying by delta_time makes damage follow simulated time.
+            # ไฟลดพลังชีวิต 8 หน่วยต่อวินาที จึงคูณเวลาต่อเฟรมเพื่อให้ความเสียหายตรงกับเวลาในเกม
+            self.damage(person, 8 * delta_time, "burn")
+        elif person.injured and not person.saved:
+            person.drip_time -= delta_time
+            if person.drip_time <= 0:
+                person.drip_time = random.uniform(0.3, 0.7)
+                self.particles.append(Particle(
+                    body_x + random.uniform(-4, 4),
+                    body_y,
+                    14,
+                    0,
+                    0,
+                    0,
+                    BLOOD,
+                    2,
+                    1.2
+                ))
 
     def check_end(self):
-        saved = sum(p.saved for p in self.people)
-        pending = sum(p.alive and not p.saved for p in self.people)
-        target = self.current_level["target"]
-        if saved + pending < target:
+        # Booleans count as 1 or 0 in sum. Lose when even all remaining survivors cannot reach the target.
+        # Otherwise finish with a win once nobody is left to cross.
+        # แพ้เมื่อจำนวนคนที่ยังช่วยได้รวมกับคนที่รอดไม่ถึงเป้าหมาย ชนะเมื่อไม่มีคนเหลือให้ข้ามและไม่เข้าเงื่อนไขแพ้
+        saved_count = sum(person.saved for person in self.people)
+        pending_count = sum(person.alive and not person.saved for person in self.people)
+        target_count = self.current_level["target"]
+        if saved_count + pending_count < target_count:
             self.state = "lose"
             self.end_screen_timer = 0
-        elif pending == 0:
+        elif pending_count == 0:
             self.state = "win"
             self.end_screen_timer = 0
-
-
